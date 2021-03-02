@@ -885,7 +885,8 @@ CWalletTx* CWallet::AddToWallet(CTransactionRef tx, const CWalletTx::Confirmatio
             wtx.m_confirm.block_height = confirm.block_height;
             if (tx->IsCoinStake() && wtx.isUnconfirmed()) {
                 WalletLogPrintf("Abandoning orphaned coinstake %s\n", hash.ToString());
-                AbandonTransaction(hash);
+                if (!AbandonTransaction(hash))
+                    WalletLogPrintf("Failed to abandon TX %s\n", hash.ToString());
             }
             fUpdated = true;
         } else {
@@ -1058,7 +1059,9 @@ bool CWallet::AbandonTransaction(const uint256& hashTx)
     auto it = mapWallet.find(hashTx);
     assert(it != mapWallet.end());
     CWalletTx& origtx = it->second;
-    if (origtx.GetDepthInMainChain() != 0 || origtx.InMempool()) {
+    int nDepth = origtx.GetDepthInMainChain();
+    if (nDepth != 0 || origtx.InMempool()) {
+        WalletLogPrintf("%s: not abandoning TX %s with GetDepthInMainChain = %i\n", __func__, hashTx.ToString(), nDepth);
         return false;
     }
 
@@ -1093,7 +1096,8 @@ bool CWallet::AbandonTransaction(const uint256& hashTx)
             // If a transaction changes 'conflicted' state, that changes the balance
             // available of the outputs it spends. So force those to be recomputed
             MarkInputsDirty(wtx.tx);
-        }
+        } else
+            WalletLogPrintf("%s: not abandoning TX %s with currentconfirm = %i\n", __func__, wtx.GetHash().ToString(), currentconfirm);
     }
 
     return true;
@@ -1887,7 +1891,8 @@ void CWallet::ReacceptWalletTransactions()
         if (nDepth == 0 && !wtx.isAbandoned()) {
             if (wtx.IsCoinBase() || wtx.IsCoinStake()) {
                 WalletLogPrintf("Abandoning orphaned coinbase/coinstake %s\n", wtxid.ToString());
-                AbandonTransaction(wtxid);
+                if (!AbandonTransaction(wtxid))
+                    WalletLogPrintf("Failed to abandon TX %s\n", wtxid.ToString());
             } else
                 mapSorted.insert(std::make_pair(wtx.nOrderPos, &wtx));
         }
