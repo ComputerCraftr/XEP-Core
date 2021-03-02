@@ -887,7 +887,8 @@ CWalletTx* CWallet::AddToWallet(CTransactionRef tx, const CWalletTx::Confirmatio
                 WalletLogPrintf("Abandoning orphaned coinstake %s\n", hash.ToString());
                 if (!AbandonTransaction(hash))
                     WalletLogPrintf("Failed to abandon TX %s\n", hash.ToString());
-            }
+            } else if (tx->IsCoinStake())
+                WalletLogPrintf("Coinstake TX %s is confirmed\n", hash.ToString());
             fUpdated = true;
         } else {
             assert(wtx.m_confirm.nIndex == confirm.nIndex);
