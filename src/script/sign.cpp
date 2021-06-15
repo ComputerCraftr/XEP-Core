@@ -27,9 +27,10 @@ bool MutableTransactionSignatureCreator::CreateSig(const SigningProvider& provid
         return false;
 
     uint256 hash = SignatureHash(scriptCode, *txTo, nIn, nHashType, amount, sigversion);
-    if (!key.Sign(hash, vchSig))
+    if (!key.SignCompact(hash, vchSig, CPubKey::SigFlag::VERSION_SIG_COMPACT))
         return false;
-    vchSig.push_back((unsigned char)nHashType);
+    if (nHashType != SIGHASH_ALL)
+        vchSig.push_back((unsigned char)nHashType);
     return true;
 }
 
@@ -268,9 +269,9 @@ private:
 public:
     SignatureExtractorChecker(SignatureData& sigdata, BaseSignatureChecker& checker) : DeferringSignatureChecker(checker), sigdata(sigdata) {}
 
-    bool CheckECDSASignature(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const override
+    bool CheckECDSASignature(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion, const std::vector<unsigned char>* const compactSig) const override
     {
-        if (m_checker.CheckECDSASignature(scriptSig, vchPubKey, scriptCode, sigversion)) {
+        if (m_checker.CheckECDSASignature(scriptSig, vchPubKey, scriptCode, sigversion, compactSig)) {
             CPubKey pubkey(vchPubKey);
             sigdata.signatures.emplace(pubkey.GetID(), SigPair(pubkey, scriptSig));
             return true;
@@ -346,8 +347,16 @@ SignatureData DataFromTransaction(const CMutableTransaction& tx, unsigned int nI
         for (const valtype& sig : stack.script) {
             for (unsigned int i = last_success_key; i < num_pubkeys; ++i) {
                 const valtype& pubkey = solutions[i+1];
+
+                valtype derSig;
+                bool fCompactSig = false;
+                if (CheckAndConvertCompactToDERSignature(sig, derSig)) {
+                    fCompactSig = true;
+                } else {
+                    derSig = sig;
+                }
                 // We either have a signature for this pubkey, or we have found a signature and it is valid
-                if (data.signatures.count(CPubKey(pubkey).GetID()) || extractor_checker.CheckECDSASignature(sig, pubkey, next_script, sigversion)) {
+                if (data.signatures.count(CPubKey(pubkey).GetID()) || extractor_checker.CheckECDSASignature(derSig, pubkey, next_script, sigversion, fCompactSig ? &sig : nullptr)) {
                     last_success_key = i + 1;
                     break;
                 }
@@ -408,7 +417,7 @@ class DummySignatureChecker final : public BaseSignatureChecker
 {
 public:
     DummySignatureChecker() {}
-    bool CheckECDSASignature(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const override { return true; }
+    bool CheckECDSASignature(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion, const std::vector<unsigned char>* const compactSig) const override { return true; }
 };
 const DummySignatureChecker DUMMY_CHECKER;
 

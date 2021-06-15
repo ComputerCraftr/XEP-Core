@@ -109,7 +109,11 @@ std::string ScriptToAsmStr(const CScript& script, const bool fAttemptSighashDeco
                     // this won't decode correctly formatted public keys in Pubkey or Multisig scripts due to
                     // the restrictions on the pubkey formats (see IsCompressedOrUncompressedPubKey) being incongruous with the
                     // checks in CheckSignatureEncoding.
-                    if (CheckSignatureEncoding(vch, SCRIPT_VERIFY_STRICTENC, nullptr)) {
+                    std::vector<unsigned char> derSig;
+                    if (vch.size() != CPubKey::COMPACT_SIGNATURE_SIZE + 1 || !CheckAndConvertCompactToDERSignature(vch, derSig)) {
+                        derSig = vch;
+                    }
+                    if (CheckSignatureEncoding(derSig, SCRIPT_VERIFY_STRICTENC, nullptr)) {
                         const unsigned char chSigHashType = vch.back();
                         const auto it = mapSigHashTypes.find(chSigHashType);
                         if (it != mapSigHashTypes.end()) {

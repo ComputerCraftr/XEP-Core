@@ -343,6 +343,75 @@ public:
 };
 }
 
+bool CheckAndConvertCompactToDERSignature(const std::vector<unsigned char>& compactSig, std::vector<unsigned char>& derSig)
+{
+    derSig.clear();
+    const size_t len = compactSig.size();
+    const bool fHasHashTypeByte = len == CPubKey::COMPACT_SIGNATURE_SIZE + 1;
+    unsigned int lenByte = 68, lenR = 32, lenS = 32;
+
+    // Compact signature should be 65 bytes with one optional hashtype byte
+    if (len != CPubKey::COMPACT_SIGNATURE_SIZE && !fHasHashTypeByte) {
+        return false;
+    }
+
+    // Compact signature must use correct version flag
+    if (CPubKey::GetSigType(compactSig[0]) != CPubKey::SigType::SIG_COMPACT) {
+        return false;
+    }
+
+    // Remove leading zero bytes from R and S
+    while (lenR >= 2 && compactSig[33 - lenR] == 0x00 && !(compactSig[34 - lenR] & 0x80)) {
+        lenByte--;
+        lenR--;
+    }
+    while (lenS >= 2 && compactSig[65 - lenS] == 0x00 && !(compactSig[66 - lenS] & 0x80)) {
+        lenByte--;
+        lenS--;
+    }
+
+    // Extra padding bytes must be added in case the highest bits of R or S are set
+    if (lenR == 32 && (compactSig[1] & 0x80)) {
+        lenByte++;
+        lenR++;
+    }
+    if (lenS == 32 && (compactSig[33] & 0x80)) {
+        lenByte++;
+        lenS++;
+    }
+
+    // Insert signature length byte
+    derSig.push_back(CPubKey::SigFlag::VERSION_SIG_DER);
+    derSig.push_back(lenByte);
+
+    // Insert R and length bytes
+    derSig.push_back(0x02);
+    derSig.push_back(lenR);
+    if (lenR == 33) {
+        derSig.push_back(0x00);
+        lenR--;
+    }
+    derSig.insert(derSig.end(), compactSig.begin() + 33 - lenR, compactSig.begin() + 33);
+
+    // Insert S and length bytes
+    derSig.push_back(0x02);
+    derSig.push_back(lenS);
+    if (lenS == 33) {
+        derSig.push_back(0x00);
+        lenS--;
+    }
+    derSig.insert(derSig.end(), compactSig.begin() + 65 - lenS, compactSig.begin() + 65);
+
+    // Add hashtype byte (default SIGHASH_ALL)
+    if (!fHasHashTypeByte) {
+        derSig.push_back(0x01);
+    } else {
+        derSig.push_back(compactSig.back());
+    }
+
+    return true;
+}
+
 static bool EvalChecksigPreTapscript(const valtype& vchSig, const valtype& vchPubKey, CScript::const_iterator pbegincodehash, CScript::const_iterator pend, unsigned int flags, const BaseSignatureChecker& checker, SigVersion sigversion, ScriptError* serror, bool& fSuccess)
 {
     assert(sigversion == SigVersion::BASE || sigversion == SigVersion::WITNESS_V0);
@@ -357,13 +426,21 @@ static bool EvalChecksigPreTapscript(const valtype& vchSig, const valtype& vchPu
             return set_error(serror, SCRIPT_ERR_SIG_FINDANDDELETE);
     }
 
-    if (!CheckSignatureEncoding(vchSig, flags, serror) || !CheckPubKeyEncoding(vchPubKey, flags, sigversion, serror)) {
+    valtype derSig;
+    bool fCompactSig = false;
+    if (CheckAndConvertCompactToDERSignature(vchSig, derSig)) {
+        fCompactSig = true;
+    } else {
+        derSig = vchSig;
+    }
+
+    if (!CheckSignatureEncoding(derSig, flags, serror) || !CheckPubKeyEncoding(vchPubKey, flags, sigversion, serror)) {
         //serror is set
         return false;
     }
-    fSuccess = checker.CheckECDSASignature(vchSig, vchPubKey, scriptCode, sigversion);
+    fSuccess = checker.CheckECDSASignature(derSig, vchPubKey, scriptCode, sigversion, fCompactSig ? &vchSig : nullptr);
 
-    if (!fSuccess && (flags & SCRIPT_VERIFY_NULLFAIL) && vchSig.size())
+    if (!fSuccess && (flags & SCRIPT_VERIFY_NULLFAIL) && derSig.size())
         return set_error(serror, SCRIPT_ERR_SIG_NULLFAIL);
 
     return true;
@@ -1211,16 +1288,24 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                         valtype& vchSig    = stacktop(-isig);
                         valtype& vchPubKey = stacktop(-ikey);
 
+                        valtype derSig;
+                        bool fCompactSig = false;
+                        if (CheckAndConvertCompactToDERSignature(vchSig, derSig)) {
+                            fCompactSig = true;
+                        } else {
+                            derSig = vchSig;
+                        }
+
                         // Note how this makes the exact order of pubkey/signature evaluation
                         // distinguishable by CHECKMULTISIG NOT if the STRICTENC flag is set.
                         // See the script_(in)valid tests for details.
-                        if (!CheckSignatureEncoding(vchSig, flags, serror) || !CheckPubKeyEncoding(vchPubKey, flags, sigversion, serror)) {
+                        if (!CheckSignatureEncoding(derSig, flags, serror) || !CheckPubKeyEncoding(vchPubKey, flags, sigversion, serror)) {
                             // serror is set
                             return false;
                         }
 
                         // Check signature
-                        bool fOk = checker.CheckECDSASignature(vchSig, vchPubKey, scriptCode, sigversion);
+                        bool fOk = checker.CheckECDSASignature(derSig, vchPubKey, scriptCode, sigversion, fCompactSig ? &vchSig : nullptr);
 
                         if (fOk) {
                             isig++;
@@ -1686,7 +1771,7 @@ bool GenericTransactionSignatureChecker<T>::VerifySchnorrSignature(Span<const un
 }
 
 template <class T>
-bool GenericTransactionSignatureChecker<T>::CheckECDSASignature(const std::vector<unsigned char>& vchSigIn, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const
+bool GenericTransactionSignatureChecker<T>::CheckECDSASignature(const std::vector<unsigned char>& vchSigIn, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion, const std::vector<unsigned char>* const compactSig) const
 {
     CPubKey pubkey(vchPubKey);
     if (!pubkey.IsValid())
@@ -1700,6 +1785,16 @@ bool GenericTransactionSignatureChecker<T>::CheckECDSASignature(const std::vecto
     vchSig.pop_back();
 
     uint256 sighash = SignatureHash(scriptCode, *txTo, nIn, nHashType, amount, sigversion, this->txdata);
+
+    // Check that the recovered pubkey matches vchPubKey
+    if (compactSig) {
+        // Strip the hashtype byte (if any) before pubkey recovery
+        std::vector<unsigned char> bareSig(compactSig->begin(), compactSig->begin() + CPubKey::COMPACT_SIGNATURE_SIZE);
+        CPubKey recoveredPubKey;
+        if (!recoveredPubKey.RecoverCompact(sighash, bareSig, CPubKey::SigFlag::VERSION_SIG_COMPACT) || recoveredPubKey != pubkey) {
+            return false;
+        }
+    }
 
     if (!VerifyECDSASignature(vchSig, pubkey, sighash))
         return false;
